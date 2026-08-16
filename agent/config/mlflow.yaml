@@ -1,0 +1,15 @@
+# MLflow configuration for Calendar Agent tracking and prompt registry.
+# Same remote MLflow server used by Colorado_IA (see MLFlow_Server repo).
+
+tracking:
+  tracking_uri: "${MLFLOW_TRACKING_URI}"
+
+experiment_name: "calendar-agent"
+
+default_tags:
+  project: "calendar-agent"
+
+prompt_registry:
+  name: "calendar-agent-system-prompt"
+  dev_alias: "challenger"
+  prod_alias: "champion"

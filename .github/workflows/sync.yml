@@ -1,0 +1,55 @@
+name: Sync Teams Calendar to Google
+
+on:
+  schedule:
+    - cron: '0 10 * * 1-5' # 7h BRT
+    - cron: '0 15 * * 1-5' # 12h BRT
+  workflow_dispatch:
+
+env:
+  TEAMS_ICS_URL: ${{ secrets.TEAMS_ICS_URL }}
+  GOOGLE_SERVICE_ACCOUNT_KEY: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_KEY }}
+  GOOGLE_CALENDAR_ID_WORK: ${{ secrets.GOOGLE_CALENDAR_ID_WORK }}
+
+jobs:
+  sync-calendar:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install --require-hashes --no-deps -r sync/requirements.txt || pip install -r sync/requirements.txt
+
+      - name: Run sync script
+        env:
+          LOG_MASK_TITLES: "1"
+          CANCEL_PREFIX: "Canceled: "
+        run: python -m sync.calendar_sync
+
+      - name: Update activity timestamp
+        run: |
+          mkdir -p .github
+          echo "Last run: $(date -u +'%Y-%m-%d %H:%M:%S UTC')" > .github/last-run.txt
+
+      - name: Commit and push activity
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git checkout -B activity-log
+          git add .github/last-run.txt
+          git diff --quiet && git diff --staged --quiet || (git commit -m "chore: update activity timestamp [skip ci]" && git push -f origin activity-log)

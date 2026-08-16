@@ -1,0 +1,30 @@
+# Casos de teste para seleção de tool: frase -> tool esperada.
+# expected_tool: "search_events" | "create_event" | "delete_event" | "none"
+# "none" cobre papo fora de escopo e pedidos que o agente ainda não sabe
+# fazer (ex: edição), para garantir que ele não tenta simular uma ação que
+# não existe. Pedidos de exclusão vagos (sem título/horário exatos) esperam
+# search_events, já que o primeiro passo do fluxo é encontrar o evento antes
+# de poder chamar delete_event.
+
+- input: "o que eu tenho essa semana?"
+  expected_tool: search_events
+- input: "marca reunião com o João amanhã às 10h até 11h"
+  expected_tool: create_event
+- input: "quais eventos eu tenho na sexta-feira?"
+  expected_tool: search_events
+- input: "agenda um almoço com a Maria sexta às 12h30 por 1 hora"
+  expected_tool: create_event
+- input: "o que eu tenho marcado para hoje?"
+  expected_tool: search_events
+- input: "cria um evento 'Dentista' amanhã de manhã às 9h até 10h"
+  expected_tool: create_event
+- input: "cancela minha reunião de amanhã"
+  expected_tool: search_events
+- input: "remove o evento 'Dentista' de amanhã das 9h às 10h da minha agenda"
+  expected_tool: delete_event
+- input: "muda o horário da minha reunião de sexta para as 15h"
+  expected_tool: none
+- input: "oi, tudo bem?"
+  expected_tool: none
+- input: "qual a capital da França?"
+  expected_tool: none

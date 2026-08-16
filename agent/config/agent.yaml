@@ -1,0 +1,15 @@
+agent:
+  model: "deepseek-chat"
+  base_url: "https://api.deepseek.com"
+  max_tokens: 1024
+  timezone: "America/Sao_Paulo"
+  # low temperature keeps tool selection deterministic-ish; this is a
+  # decision-making agent, not a creative-writing one
+  temperature: 0
+  # true -> load system prompt @champion alias, false -> @challenger
+  production_mode: true
+  # true -> create_event/delete_event never write to Google Calendar for
+  # real, even if the human confirms. Safety net for local validation and
+  # for eval/automation contexts. Flip to false only once you trust the
+  # agent's behavior.
+  dry_run: false
