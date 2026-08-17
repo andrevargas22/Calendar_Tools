@@ -10,9 +10,9 @@ Automatically syncs my work calendar (Microsoft Teams) with Google Calendar. Run
 **Stack:** Python, Google Calendar API, GitHub Actions.
 
 ### `agent/`
-Natural language agent to create, search, and cancel events on my personal Google Calendar via chat.
+Natural language agent to create, search, and cancel events on my personal Google Calendar via chat. Deployed as a Telegram bot (webhook, single authorized user) on Google Cloud Run — see `agent/src/telegram_bot.py`, `agent/scripts/set_webhook.py`, and `.github/workflows/deploy-bot.yml`. Also runnable locally as a terminal REPL via `make agent-run`.
 
-**Stack:** Python, DeepSeek (function calling), Google Calendar API, MLflow.
+**Stack:** Python, DeepSeek (function calling), Google Calendar API, MLflow, Flask (Telegram webhook), Cloud Run.
 
 ## Structure
 

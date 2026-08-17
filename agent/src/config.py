@@ -129,6 +129,18 @@ class ConfigManager:
     def get_google_calendar_id(self) -> Optional[str]:
         return os.getenv("GOOGLE_CALENDAR_ID_PERSONAL")
 
+    # -- telegram bot ---------------------------------------------------------
+
+    def get_telegram_bot_token(self) -> Optional[str]:
+        return os.getenv("TELEGRAM_BOT_TOKEN")
+
+    def get_telegram_allowed_user_id(self) -> Optional[int]:
+        value = os.getenv("TELEGRAM_ALLOWED_USER_ID")
+        return int(value) if value else None
+
+    def get_telegram_webhook_secret(self) -> Optional[str]:
+        return os.getenv("TELEGRAM_WEBHOOK_SECRET")
+
     # -- MLflow tracking -----------------------------------------------------
 
     def get_mlflow_tracking_uri(self) -> Optional[str]:

@@ -21,8 +21,10 @@ import json
 import logging
 import tempfile
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Optional, Union
 from zoneinfo import ZoneInfo
 
 from openai import OpenAI
@@ -33,7 +35,33 @@ from agent.src.tools import TOOL_SCHEMAS, find_matching_events, run_search_event
 
 logger = logging.getLogger(__name__)
 
-_CONFIRM_YES = {"s", "sim", "y", "yes"}
+CONFIRM_YES = {"s", "sim", "y", "yes"}
+
+_PENDING_PLACEHOLDER = "[Aguardando confirmação do usuário.]"
+
+
+@dataclass
+class PendingAction:
+    """A create/delete proposal awaiting human confirmation.
+
+    `message_index` points at the placeholder tool-result message in the
+    turn's `messages` list — confirm_pending_action() overwrites it in place
+    once the human answers, so the OpenAI-style history stays valid (every
+    tool_calls message must be immediately followed by a matching tool
+    response).
+    """
+
+    kind: str  # "create" | "delete"
+    prompt: str
+    message_index: int = -1
+    args: Optional[dict] = None  # kind == "create"
+    event: Optional[dict] = None  # kind == "delete"
+
+
+@dataclass
+class TurnResult:
+    text: str
+    pending: Optional[PendingAction] = None
 
 
 class CalendarAgent:
@@ -66,16 +94,40 @@ class CalendarAgent:
         )
         return self.system_prompt + context
 
-    def handle_turn(self, messages: list) -> str:
+    def handle_turn(self, messages: list) -> TurnResult:
         """
         Run one full turn: `messages` already ends with the new user message.
         Mutates `messages` in place with the assistant/tool exchanges (so the
-        caller can keep it around for multi-turn context) and returns the
-        final assistant text.
+        caller can keep it around for multi-turn context). Returns a
+        TurnResult — if `pending` is set, a create/delete proposal is
+        awaiting human confirmation and must be resolved via
+        confirm_pending_action() before the next handle_turn() call.
         """
         user_input = messages[-1]["content"] if messages and messages[-1]["role"] == "user" else ""
         trace = {"user_input": user_input, "steps": []}
+        return self._run_turn(messages, trace)
 
+    def confirm_pending_action(self, messages: list, pending: PendingAction, confirmed: bool) -> TurnResult:
+        """
+        Resolve a PendingAction returned by a previous handle_turn()/
+        confirm_pending_action() call: execute the write (or record the
+        cancellation) and overwrite the placeholder tool-result left in
+        `messages` at `pending.message_index`, then resume the model loop so
+        it can wrap the outcome into a natural-language reply.
+        """
+        result_text = self._resolve_pending(pending, confirmed)
+        messages[pending.message_index]["content"] = result_text
+
+        trace = {
+            "user_input": f"[confirmação: {'sim' if confirmed else 'não'}]",
+            "steps": [{"tool": f"{pending.kind}_event (confirmação)", "input": None, "result": result_text}],
+        }
+        return self._run_turn(messages, trace)
+
+    def _run_turn(self, messages: list, trace: dict) -> TurnResult:
+        """Model-call/tool-dispatch loop shared by handle_turn() and
+        confirm_pending_action(). Stops as soon as a tool dispatch yields a
+        PendingAction, without making a further model call."""
         system = self._build_system()
         start_time = time.perf_counter()
         total_input_tokens = 0
@@ -85,6 +137,7 @@ class CalendarAgent:
         tools_called: list[str] = []
         status = "success"
         final_text = ""
+        pending: Optional[PendingAction] = None
 
         try:
             while True:
@@ -119,20 +172,50 @@ class CalendarAgent:
                     final_text = message.content or ""
                     break
 
-                for tc in message.tool_calls:
+                for i, tc in enumerate(message.tool_calls):
                     num_tool_calls += 1
                     tools_called.append(tc.function.name)
                     args = json.loads(tc.function.arguments or "{}")
 
-                    result_text = self._dispatch_tool(tc.function.name, args)
-                    trace["steps"].append({"tool": tc.function.name, "input": args, "result": result_text})
+                    result = self._dispatch_tool(tc.function.name, args)
 
-                    messages.append({"role": "tool", "tool_call_id": tc.id, "content": result_text})
+                    if isinstance(result, PendingAction):
+                        result.message_index = len(messages)
+                        messages.append({"role": "tool", "tool_call_id": tc.id, "content": _PENDING_PLACEHOLDER})
+                        trace["steps"].append(
+                            {"tool": tc.function.name, "input": args, "result": "pending_confirmation"}
+                        )
+
+                        # Any further tool_calls in this same model response
+                        # still need a matching tool reply to keep the
+                        # history API-valid, even though they won't run.
+                        for rtc in message.tool_calls[i + 1 :]:
+                            messages.append(
+                                {
+                                    "role": "tool",
+                                    "tool_call_id": rtc.id,
+                                    "content": "[Ação cancelada: havia uma confirmação pendente antes desta chamada.]",
+                                }
+                            )
+
+                        final_text = result.prompt
+                        pending = result
+                        break
+
+                    trace["steps"].append({"tool": tc.function.name, "input": args, "result": result})
+                    messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
+
+                if pending is not None:
+                    break
 
         except Exception as e:
             status = "error"
             final_text = f"Ocorreu um erro ao processar seu pedido: {e}"
+            pending = None
             logger.exception("Agent turn failed")
+
+        if pending is not None:
+            status = "pending_confirmation"
 
         trace["final_response"] = final_text
         latency_s = time.perf_counter() - start_time
@@ -147,9 +230,9 @@ class CalendarAgent:
             latency_s=latency_s,
             trace=trace,
         )
-        return final_text
+        return TurnResult(text=final_text, pending=pending)
 
-    def _dispatch_tool(self, name: str, args: dict) -> str:
+    def _dispatch_tool(self, name: str, args: dict) -> Union[str, PendingAction]:
         if name == "search_events":
             return run_search_events(self._get_service(), self.calendar_id, args)
         if name == "create_event":
@@ -158,70 +241,59 @@ class CalendarAgent:
             return self._handle_delete_event(args)
         return f"Ferramenta desconhecida: {name}"
 
-    def _handle_create_event(self, args: dict) -> str:
+    def _handle_create_event(self, args: dict) -> Union[str, PendingAction]:
         """
         Guardrail for create_event:
           1. Idempotency check against the calendar itself (source of truth) —
              if an event with the same normalized title/start/end already
              exists, skip straight to a no-op instead of asking again.
-          2. Explicit human confirmation in the terminal before writing.
+          2. Explicit human confirmation before writing — returned as a
+             PendingAction for the caller (REPL or bot) to resolve.
           3. dry_run config flag as an extra safety net that applies even if
-             the human confirms (default true — flip only once trusted).
+             the human confirms (checked in _resolve_pending, default true —
+             flip only once trusted).
         """
         title = args["title"]
         start = datetime.fromisoformat(args["start"])
         end = datetime.fromisoformat(args["end"])
         description = args.get("description")
 
-        svc = self._get_service()
-
-        matches = find_matching_events(svc, self.calendar_id, title, start, end)
+        matches = find_matching_events(self._get_service(), self.calendar_id, title, start, end)
         if matches:
             return (
                 f"Já existe um evento idêntico ('{matches[0]['titulo']}') nesse horário — "
                 "nada foi criado (idempotência)."
             )
 
-        print("\nO agente quer criar o seguinte evento:")
-        print(f"  Título: {title}")
-        print(f"  Início: {start.isoformat()}")
-        print(f"  Fim:    {end.isoformat()}")
+        prompt_lines = [
+            "O agente quer criar o seguinte evento:",
+            f"  Título: {title}",
+            f"  Início: {start.isoformat()}",
+            f"  Fim:    {end.isoformat()}",
+        ]
         if description:
-            print(f"  Descrição: {description}")
-        answer = input("Confirmar criação? [s/N] ").strip().lower()
+            prompt_lines.append(f"  Descrição: {description}")
+        prompt_lines.append("Confirmar criação? [s/N]")
 
-        if answer not in _CONFIRM_YES:
-            return "O usuário cancelou a criação do evento."
+        return PendingAction(kind="create", prompt="\n".join(prompt_lines), args=args)
 
-        if self.config.is_dry_run():
-            return f"[DRY RUN] Evento '{title}' seria criado, mas dry_run está ativado — nada foi escrito na agenda."
-
-        result = criar_evento_google(
-            svc,
-            self.calendar_id,
-            {"titulo": title, "inicio": args["start"], "fim": args["end"], "descricao": description},
-            self.config.get_timezone(),
-        )
-        return f"Evento '{title}' criado com sucesso (ID: {result.get('id', 'unknown')})."
-
-    def _handle_delete_event(self, args: dict) -> str:
+    def _handle_delete_event(self, args: dict) -> Union[str, PendingAction]:
         """
         Guardrail for delete_event, mirroring _handle_create_event:
           1. Look up the event against the calendar itself by normalized
              title + exact start/end (same matching used for create's
              idempotency check). Zero matches -> no-op. More than one
              identical match -> refuse to guess, ask for more specificity.
-          2. Explicit human confirmation in the terminal before deleting.
+          2. Explicit human confirmation before deleting — returned as a
+             PendingAction for the caller to resolve.
           3. dry_run config flag as an extra safety net that applies even if
-             the human confirms.
+             the human confirms (checked in _resolve_pending).
         """
         title = args["title"]
         start = datetime.fromisoformat(args["start"])
         end = datetime.fromisoformat(args["end"])
 
-        svc = self._get_service()
-
-        matches = find_matching_events(svc, self.calendar_id, title, start, end)
+        matches = find_matching_events(self._get_service(), self.calendar_id, title, start, end)
         if not matches:
             return "Não encontrei nenhum evento com esse título e horário exatos — nada foi removido."
         if len(matches) > 1:
@@ -231,19 +303,44 @@ class CalendarAgent:
             )
 
         event = matches[0]
-        print("\nO agente quer remover o seguinte evento:")
-        print(f"  Título: {event['titulo']}")
-        print(f"  Início: {event['inicio'].isoformat()}")
-        print(f"  Fim:    {event['fim'].isoformat()}")
-        answer = input("Confirmar remoção? [s/N] ").strip().lower()
+        prompt = (
+            "O agente quer remover o seguinte evento:\n"
+            f"  Título: {event['titulo']}\n"
+            f"  Início: {event['inicio'].isoformat()}\n"
+            f"  Fim:    {event['fim'].isoformat()}\n"
+            "Confirmar remoção? [s/N]"
+        )
+        return PendingAction(kind="delete", prompt=prompt, event=event)
 
-        if answer not in _CONFIRM_YES:
-            return "O usuário cancelou a remoção do evento."
+    def _resolve_pending(self, pending: PendingAction, confirmed: bool) -> str:
+        if not confirmed:
+            return (
+                "O usuário cancelou a criação do evento."
+                if pending.kind == "create"
+                else "O usuário cancelou a remoção do evento."
+            )
 
+        if pending.kind == "create":
+            title = pending.args["title"]
+            if self.config.is_dry_run():
+                return f"[DRY RUN] Evento '{title}' seria criado, mas dry_run está ativado — nada foi escrito na agenda."
+            result = criar_evento_google(
+                self._get_service(),
+                self.calendar_id,
+                {
+                    "titulo": title,
+                    "inicio": pending.args["start"],
+                    "fim": pending.args["end"],
+                    "descricao": pending.args.get("description"),
+                },
+                self.config.get_timezone(),
+            )
+            return f"Evento '{title}' criado com sucesso (ID: {result.get('id', 'unknown')})."
+
+        title = pending.event["titulo"]
         if self.config.is_dry_run():
             return f"[DRY RUN] Evento '{title}' seria removido, mas dry_run está ativado — nada foi apagado da agenda."
-
-        success = remover_evento_google_by_id(svc, self.calendar_id, event["id"], event["titulo"])
+        success = remover_evento_google_by_id(self._get_service(), self.calendar_id, pending.event["id"], title)
         if success:
             return f"Evento '{title}' removido com sucesso."
         return f"Falha ao remover o evento '{title}' — veja os logs para detalhes."

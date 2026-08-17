@@ -1,0 +1,85 @@
+name: Deploy Telegram Bot to Cloud Run
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'agent/**'
+      - 'common/**'
+      - 'Dockerfile'
+      - '.gcloudignore'
+      - '.github/workflows/deploy-bot.yml'
+  workflow_dispatch:
+
+env:
+  SERVICE_NAME: calendar-agent-bot
+  REGION: southamerica-east1
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+      - run: pip install -r agent/requirements.txt
+      - run: pytest agent/tests/ -v
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      # GOOGLE_SERVICE_ACCOUNT_KEY is a raw JSON blob (commas, braces,
+      # newlines) — `gcloud run deploy --set-env-vars` splits on commas, so
+      # feeding it there would silently corrupt the value. Write every var to
+      # a YAML file instead and pass that, which has no such delimiter issue.
+      - name: Write Cloud Run env vars file
+        env:
+          GOOGLE_CALENDAR_ID_PERSONAL: ${{ secrets.GOOGLE_CALENDAR_ID_PERSONAL }}
+          MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+          TELEGRAM_ALLOWED_USER_ID: ${{ secrets.TELEGRAM_ALLOWED_USER_ID }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          GOOGLE_SERVICE_ACCOUNT_KEY: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_WEBHOOK_SECRET: ${{ secrets.TELEGRAM_WEBHOOK_SECRET }}
+        run: |
+          python3 -m pip install --quiet pyyaml
+          python3 - <<'PY'
+          import os
+          import yaml
+
+          keys = [
+              "GOOGLE_CALENDAR_ID_PERSONAL",
+              "MLFLOW_TRACKING_URI",
+              "TELEGRAM_ALLOWED_USER_ID",
+              "DEEPSEEK_API_KEY",
+              "GOOGLE_SERVICE_ACCOUNT_KEY",
+              "TELEGRAM_BOT_TOKEN",
+              "TELEGRAM_WEBHOOK_SECRET",
+          ]
+          with open("env-vars.yaml", "w") as f:
+              yaml.safe_dump({k: os.environ[k] for k in keys}, f)
+          PY
+
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy "$SERVICE_NAME" \
+            --source . \
+            --region "$REGION" \
+            --project "${{ secrets.GCP_PROJECT_ID }}" \
+            --min-instances=1 --max-instances=1 \
+            --allow-unauthenticated \
+            --env-vars-file=env-vars.yaml
