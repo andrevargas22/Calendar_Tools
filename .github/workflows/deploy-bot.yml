@@ -13,7 +13,7 @@ on:
 
 env:
   SERVICE_NAME: calendar-agent-bot
-  REGION: southamerica-east1
+  REGION: uscentral-1
 
 jobs:
   test:
