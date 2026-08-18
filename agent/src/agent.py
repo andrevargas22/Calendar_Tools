@@ -175,9 +175,26 @@ class CalendarAgent:
                 for i, tc in enumerate(message.tool_calls):
                     num_tool_calls += 1
                     tools_called.append(tc.function.name)
-                    args = json.loads(tc.function.arguments or "{}")
 
-                    result = self._dispatch_tool(tc.function.name, args)
+                    try:
+                        args = json.loads(tc.function.arguments or "{}")
+                        result = self._dispatch_tool(tc.function.name, args)
+                    except Exception as e:
+                        # A tool_calls message has already been appended to
+                        # `messages` above — every tool_call in it MUST get a
+                        # matching tool-role reply no matter what, or the next
+                        # model call (possibly turns later, since `messages`
+                        # is persisted across the whole chat session) fails
+                        # outright with "insufficient tool messages following
+                        # tool_calls message". So a failed dispatch (or
+                        # malformed arguments) becomes an ordinary error
+                        # string result instead of propagating — same
+                        # downstream handling as any other tool result, and
+                        # the model gets a chance to explain the failure in
+                        # natural language instead of the turn just dying.
+                        logger.exception(f"Tool '{tc.function.name}' failed")
+                        args = {}
+                        result = f"Erro ao executar a ferramenta '{tc.function.name}': {e}"
 
                     if isinstance(result, PendingAction):
                         result.message_index = len(messages)

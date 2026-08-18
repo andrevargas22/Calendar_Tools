@@ -95,6 +95,67 @@ def _seed_pending_delete(event=None):
 @patch("agent.src.agent.get_calendar_service")
 @patch("agent.src.agent.OpenAI")
 @patch("agent.src.agent.get_config")
+class TestToolDispatchFailureKeepsHistoryValid:
+    """
+    Regression test for a real production incident: a transient Google
+    Calendar SSL error raised out of _handle_create_event, which propagated
+    past the tool-call loop and left the assistant's tool_calls message with
+    no matching tool-role reply. Because `messages` is persisted for the
+    whole chat session (see telegram_bot.py), every subsequent turn in that
+    chat then failed outright with DeepSeek's 400 "insufficient tool
+    messages following tool_calls message" — the conversation was
+    permanently wedged until the process restarted.
+    """
+
+    def test_dispatch_exception_becomes_tool_result_not_a_dangling_tool_call(
+        self, mock_get_config, mock_openai_cls, mock_get_service
+    ):
+        mock_get_config.return_value = _mock_config(dry_run=False)
+        svc = MagicMock()
+        svc.events.return_value.list.return_value.execute.side_effect = OSError(
+            "[SSL: UNEXPECTED_EOF_WHILE_READING] unexpected eof while reading"
+        )
+        mock_get_service.return_value = svc
+
+        args = {"title": "Dentista", "start": "2026-08-20T10:00:00", "end": "2026-08-20T11:00:00"}
+        client = MagicMock()
+        client.chat.completions.create.side_effect = [
+            _model_response(tool_calls=[_tool_call("call1", "create_event", args)]),
+            _model_response(content="Deu um erro ao consultar sua agenda, tente de novo em instantes."),
+        ]
+        mock_openai_cls.return_value = client
+
+        agent = CalendarAgent()
+        messages = [{"role": "user", "content": "cria dentista amanha"}]
+        result = agent.handle_turn(messages)
+
+        assert result.pending is None
+        assert client.chat.completions.create.call_count == 2
+
+        # every tool_calls message must be immediately followed by a matching
+        # tool-role reply, or the next model call in this same chat session
+        # (this `messages` list is reused turn after turn) is rejected outright
+        for i, msg in enumerate(messages):
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                expected_ids = {tc["id"] for tc in msg["tool_calls"]}
+                got_ids = set()
+                j = i + 1
+                while j < len(messages) and messages[j]["role"] == "tool":
+                    got_ids.add(messages[j]["tool_call_id"])
+                    j += 1
+                assert got_ids == expected_ids, f"message {i} has unanswered tool_calls: {expected_ids - got_ids}"
+
+        # a follow-up turn in the same session must still be able to call the
+        # model at all (i.e. nothing about the corrupted history blocks it)
+        messages.append({"role": "user", "content": "tenta de novo"})
+        client.chat.completions.create.side_effect = [_model_response(content="Ok, tentando de novo.")]
+        follow_up = agent.handle_turn(messages)
+        assert follow_up.text == "Ok, tentando de novo."
+
+
+@patch("agent.src.agent.get_calendar_service")
+@patch("agent.src.agent.OpenAI")
+@patch("agent.src.agent.get_config")
 class TestHandleTurnCreatesPending:
     def test_create_with_no_existing_match_returns_pending(self, mock_get_config, mock_openai_cls, mock_get_service):
         mock_get_config.return_value = _mock_config(dry_run=False)
