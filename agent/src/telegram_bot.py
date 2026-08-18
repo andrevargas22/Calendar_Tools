@@ -1,15 +1,7 @@
 """
-Telegram webhook receiver for Calendar Agent.
-
-No Telegram SDK — same "plain loop, call the HTTP API directly" philosophy as
-agent.py's DeepSeek integration: `requests` against Telegram's Bot API for
-sending replies, and Flask for receiving updates. Single authorized user
-(the repo owner), single Cloud Run instance (see Dockerfile), in-memory
-per-chat session state — no database, no message queue.
-
-Processing happens synchronously inside the webhook request: DeepSeek +
-Google Calendar calls finish in a few seconds, comfortably inside both
-Telegram's webhook timeout (~60s) and Cloud Run's default request timeout.
+Telegram webhook receiver for Calendar Agent. No Telegram SDK — calls the Bot
+API directly via `requests`, matching agent.py's DeepSeek integration style.
+Single authorized user, single instance, in-memory per-chat session state.
 """
 
 import hmac
@@ -27,9 +19,7 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-_agent = None  # lazily constructed: CalendarAgent() touches MLflow/network, so
-               # the process can start (and pass Cloud Run's health check)
-               # before paying that cost on the first real message
+_agent = None  # lazy: CalendarAgent() touches MLflow/network, don't block startup on it
 _sessions: dict = {}  # chat_id -> {"messages": list, "pending": PendingAction | None}
 
 _TELEGRAM_API = "https://api.telegram.org/bot{token}/sendMessage"

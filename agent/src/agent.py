@@ -1,20 +1,8 @@
 """
 Native tool-calling agent loop for Calendar Agent, on top of DeepSeek's
-OpenAI-compatible chat completions API.
-
-No agent framework — this is a plain loop around function calling, per turn:
-
-  1. Call the model with the tool schemas.
-  2. If it asks for a tool, execute it (search_events runs directly;
-     create_event and delete_event go through a matching lookup against the
-     calendar and a human confirmation gate — see _handle_create_event and
-     _handle_delete_event) and feed the result back as a "tool" role message.
-  3. Repeat until the model responds with plain text (finish_reason != "tool_calls").
-
-Every turn is traced to MLflow (params, token/latency metrics, tags, and a
-JSON artifact of the tool-call trace), mirroring the pattern in
-Colorado_IA/scripts/2 - summarize_text.py. If MLflow isn't reachable the
-agent still works — observability must never take down the main function.
+OpenAI-compatible chat completions API. No agent framework — a plain loop:
+call the model, dispatch any tool calls, repeat until it replies in plain text.
+Each turn is traced to MLflow if reachable; tracing failures never break the turn.
 """
 
 import json
@@ -42,14 +30,7 @@ _PENDING_PLACEHOLDER = "[Aguardando confirmação do usuário.]"
 
 @dataclass
 class PendingAction:
-    """A create/delete proposal awaiting human confirmation.
-
-    `message_index` points at the placeholder tool-result message in the
-    turn's `messages` list — confirm_pending_action() overwrites it in place
-    once the human answers, so the OpenAI-style history stays valid (every
-    tool_calls message must be immediately followed by a matching tool
-    response).
-    """
+    """A create/delete proposal awaiting human confirmation."""
 
     kind: str  # "create" | "delete"
     prompt: str
@@ -95,26 +76,14 @@ class CalendarAgent:
         return self.system_prompt + context
 
     def handle_turn(self, messages: list) -> TurnResult:
-        """
-        Run one full turn: `messages` already ends with the new user message.
-        Mutates `messages` in place with the assistant/tool exchanges (so the
-        caller can keep it around for multi-turn context). Returns a
-        TurnResult — if `pending` is set, a create/delete proposal is
-        awaiting human confirmation and must be resolved via
-        confirm_pending_action() before the next handle_turn() call.
-        """
+        """Run one turn, mutating `messages` in place. If the result's `pending` is
+        set, resolve it via confirm_pending_action() before the next call."""
         user_input = messages[-1]["content"] if messages and messages[-1]["role"] == "user" else ""
         trace = {"user_input": user_input, "steps": []}
         return self._run_turn(messages, trace)
 
     def confirm_pending_action(self, messages: list, pending: PendingAction, confirmed: bool) -> TurnResult:
-        """
-        Resolve a PendingAction returned by a previous handle_turn()/
-        confirm_pending_action() call: execute the write (or record the
-        cancellation) and overwrite the placeholder tool-result left in
-        `messages` at `pending.message_index`, then resume the model loop so
-        it can wrap the outcome into a natural-language reply.
-        """
+        """Execute (or cancel) a PendingAction, then resume the model loop for a natural-language reply."""
         result_text = self._resolve_pending(pending, confirmed)
         messages[pending.message_index]["content"] = result_text
 
@@ -125,9 +94,7 @@ class CalendarAgent:
         return self._run_turn(messages, trace)
 
     def _run_turn(self, messages: list, trace: dict) -> TurnResult:
-        """Model-call/tool-dispatch loop shared by handle_turn() and
-        confirm_pending_action(). Stops as soon as a tool dispatch yields a
-        PendingAction, without making a further model call."""
+        """Model-call/tool-dispatch loop shared by handle_turn() and confirm_pending_action()."""
         system = self._build_system()
         start_time = time.perf_counter()
         total_input_tokens = 0
@@ -180,18 +147,8 @@ class CalendarAgent:
                         args = json.loads(tc.function.arguments or "{}")
                         result = self._dispatch_tool(tc.function.name, args)
                     except Exception as e:
-                        # A tool_calls message has already been appended to
-                        # `messages` above — every tool_call in it MUST get a
-                        # matching tool-role reply no matter what, or the next
-                        # model call (possibly turns later, since `messages`
-                        # is persisted across the whole chat session) fails
-                        # outright with "insufficient tool messages following
-                        # tool_calls message". So a failed dispatch (or
-                        # malformed arguments) becomes an ordinary error
-                        # string result instead of propagating — same
-                        # downstream handling as any other tool result, and
-                        # the model gets a chance to explain the failure in
-                        # natural language instead of the turn just dying.
+                        # Every tool_calls message needs a matching tool reply, or the next
+                        # model call in this session fails outright — never let this propagate.
                         logger.exception(f"Tool '{tc.function.name}' failed")
                         args = {}
                         result = f"Erro ao executar a ferramenta '{tc.function.name}': {e}"
@@ -203,9 +160,7 @@ class CalendarAgent:
                             {"tool": tc.function.name, "input": args, "result": "pending_confirmation"}
                         )
 
-                        # Any further tool_calls in this same model response
-                        # still need a matching tool reply to keep the
-                        # history API-valid, even though they won't run.
+                        # remaining tool_calls in this response still need a matching reply
                         for rtc in message.tool_calls[i + 1 :]:
                             messages.append(
                                 {
@@ -259,17 +214,7 @@ class CalendarAgent:
         return f"Ferramenta desconhecida: {name}"
 
     def _handle_create_event(self, args: dict) -> Union[str, PendingAction]:
-        """
-        Guardrail for create_event:
-          1. Idempotency check against the calendar itself (source of truth) —
-             if an event with the same normalized title/start/end already
-             exists, skip straight to a no-op instead of asking again.
-          2. Explicit human confirmation before writing — returned as a
-             PendingAction for the caller (REPL or bot) to resolve.
-          3. dry_run config flag as an extra safety net that applies even if
-             the human confirms (checked in _resolve_pending, default true —
-             flip only once trusted).
-        """
+        """Idempotency check, then return a PendingAction for the caller to confirm (dry_run applies later, in _resolve_pending)."""
         title = args["title"]
         start = datetime.fromisoformat(args["start"])
         end = datetime.fromisoformat(args["end"])
@@ -295,17 +240,7 @@ class CalendarAgent:
         return PendingAction(kind="create", prompt="\n".join(prompt_lines), args=args)
 
     def _handle_delete_event(self, args: dict) -> Union[str, PendingAction]:
-        """
-        Guardrail for delete_event, mirroring _handle_create_event:
-          1. Look up the event against the calendar itself by normalized
-             title + exact start/end (same matching used for create's
-             idempotency check). Zero matches -> no-op. More than one
-             identical match -> refuse to guess, ask for more specificity.
-          2. Explicit human confirmation before deleting — returned as a
-             PendingAction for the caller to resolve.
-          3. dry_run config flag as an extra safety net that applies even if
-             the human confirms (checked in _resolve_pending).
-        """
+        """Look up the exact event by title+time; zero/multiple matches are an immediate no-op, one match returns a PendingAction."""
         title = args["title"]
         start = datetime.fromisoformat(args["start"])
         end = datetime.fromisoformat(args["end"])

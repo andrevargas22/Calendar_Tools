@@ -25,10 +25,7 @@ agent-promote:
 agent-run:
 	python -m agent.scripts.chat
 
-# local dev server for the Telegram webhook (production uses gunicorn, see
-# Dockerfile). To test real Telegram messages against it, tunnel this port
-# with e.g. `ngrok http 8080`, then run `make agent-set-webhook URL=<ngrok-url>`
-# temporarily, and point the webhook back at the Cloud Run URL afterwards.
+# local dev server; tunnel it (e.g. ngrok) + agent-set-webhook to test real Telegram messages
 agent-serve:
 	FLASK_APP=agent.src.telegram_bot:app flask run --port 8080
 

@@ -1,12 +1,7 @@
 """
-Unit tests for CalendarAgent's confirmation state machine — the pending
-create_event/delete_event proposal that a UI-agnostic caller (REPL, Telegram
-bot) resolves via confirm_pending_action() instead of the agent blocking on
-input() itself.
-
-The DeepSeek client and the Google Calendar service are both mocked; only
-the state machine (handle_turn / confirm_pending_action / _resolve_pending)
-is under test.
+Unit tests for CalendarAgent's confirmation state machine (handle_turn /
+confirm_pending_action / _resolve_pending). DeepSeek client and the Google
+Calendar service are both mocked.
 """
 
 import json
@@ -96,16 +91,7 @@ def _seed_pending_delete(event=None):
 @patch("agent.src.agent.OpenAI")
 @patch("agent.src.agent.get_config")
 class TestToolDispatchFailureKeepsHistoryValid:
-    """
-    Regression test for a real production incident: a transient Google
-    Calendar SSL error raised out of _handle_create_event, which propagated
-    past the tool-call loop and left the assistant's tool_calls message with
-    no matching tool-role reply. Because `messages` is persisted for the
-    whole chat session (see telegram_bot.py), every subsequent turn in that
-    chat then failed outright with DeepSeek's 400 "insufficient tool
-    messages following tool_calls message" — the conversation was
-    permanently wedged until the process restarted.
-    """
+    """Regression: a tool dispatch exception must not leave a tool_calls message unanswered."""
 
     def test_dispatch_exception_becomes_tool_result_not_a_dangling_tool_call(
         self, mock_get_config, mock_openai_cls, mock_get_service
@@ -132,9 +118,7 @@ class TestToolDispatchFailureKeepsHistoryValid:
         assert result.pending is None
         assert client.chat.completions.create.call_count == 2
 
-        # every tool_calls message must be immediately followed by a matching
-        # tool-role reply, or the next model call in this same chat session
-        # (this `messages` list is reused turn after turn) is rejected outright
+        # every tool_calls message must have a matching tool-role reply
         for i, msg in enumerate(messages):
             if msg.get("role") == "assistant" and msg.get("tool_calls"):
                 expected_ids = {tc["id"] for tc in msg["tool_calls"]}
@@ -145,8 +129,7 @@ class TestToolDispatchFailureKeepsHistoryValid:
                     j += 1
                 assert got_ids == expected_ids, f"message {i} has unanswered tool_calls: {expected_ids - got_ids}"
 
-        # a follow-up turn in the same session must still be able to call the
-        # model at all (i.e. nothing about the corrupted history blocks it)
+        # a follow-up turn must still work
         messages.append({"role": "user", "content": "tenta de novo"})
         client.chat.completions.create.side_effect = [_model_response(content="Ok, tentando de novo.")]
         follow_up = agent.handle_turn(messages)
@@ -180,8 +163,7 @@ class TestHandleTurnCreatesPending:
         assert "Confirmar criação" in result.text
         assert client.chat.completions.create.call_count == 1
 
-        # history stays API-valid: the tool_calls message is immediately
-        # followed by a matching tool response (the placeholder).
+        # placeholder tool response is appended right after the tool_calls message
         assert messages[-2]["tool_calls"][0]["id"] == "call1"
         assert messages[-1] == {"role": "tool", "tool_call_id": "call1", "content": _PENDING_PLACEHOLDER}
         assert result.pending.message_index == len(messages) - 1

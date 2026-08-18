@@ -1,9 +1,4 @@
-"""
-Unit tests for the Telegram webhook receiver. `CalendarAgent` is replaced
-with a MagicMock via `telegram_bot._agent` (lazy singleton — see
-_get_agent() in telegram_bot.py) so these tests never touch DeepSeek,
-MLflow, or Google Calendar, matching the mocking style in test_agent.py.
-"""
+"""Unit tests for the Telegram webhook receiver. CalendarAgent is replaced with a MagicMock via telegram_bot._agent."""
 
 from unittest.mock import MagicMock, patch
 

@@ -42,10 +42,7 @@ jobs:
 
       - uses: google-github-actions/setup-gcloud@v2
 
-      # GOOGLE_SERVICE_ACCOUNT_KEY is a raw JSON blob (commas, braces,
-      # newlines) — `gcloud run deploy --set-env-vars` splits on commas, so
-      # feeding it there would silently corrupt the value. Write every var to
-      # a YAML file instead and pass that, which has no such delimiter issue.
+      # --set-env-vars splits on commas, which corrupts the JSON service account key; use a file instead.
       - name: Write Cloud Run env vars file
         env:
           GOOGLE_CALENDAR_ID_PERSONAL: ${{ secrets.GOOGLE_CALENDAR_ID_PERSONAL }}
