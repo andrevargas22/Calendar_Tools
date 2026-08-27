@@ -129,6 +129,9 @@ class ConfigManager:
     def get_google_calendar_id(self) -> Optional[str]:
         return os.getenv("GOOGLE_CALENDAR_ID_PERSONAL")
 
+    def get_google_calendar_id_pets(self) -> Optional[str]:
+        return os.getenv("GOOGLE_CALENDAR_ID_PETS")
+
     # -- telegram bot ---------------------------------------------------------
 
     def get_telegram_bot_token(self) -> Optional[str]:

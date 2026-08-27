@@ -1,17 +1,23 @@
 """
 Tool schemas (OpenAI-compatible function-calling format, used by DeepSeek)
-and the execution function for the read-only tool.
-
-create_event and delete_event have no execution function here on purpose:
-deciding whether to actually write to the calendar involves a human
-confirmation step (and, for create, an idempotency check), both of which are
-about the conversation/session, not about the tool call itself — that
-orchestration lives in src/agent.py.
+and the execution function for the read-only tool. create_event, delete_event
+and update_event have no execution function here — writing needs a human
+confirmation step, orchestrated in src/agent.py instead.
 """
 
 from datetime import datetime
 
 from common.google_calendar import get_google_events
+
+_CALENDAR_PARAM = {
+    "type": "string",
+    "enum": ["pessoal", "pets"],
+    "description": (
+        "Qual agenda usar: 'pessoal' (padrão) para a agenda pessoal do usuário, 'pets' "
+        "para a agenda compartilhada dos cachorros Quico e Bibi (veterinário, remédio, "
+        "banho/tosa etc). Se não for claramente sobre os cachorros, use 'pessoal'."
+    ),
+}
 
 TOOL_SCHEMAS = [
     {
@@ -30,6 +36,7 @@ TOOL_SCHEMAS = [
                         "type": "string",
                         "description": "Fim do intervalo em ISO 8601, ex: 2026-08-14T23:59:59",
                     },
+                    "calendar": _CALENDAR_PARAM,
                 },
                 "required": ["start", "end"],
             },
@@ -51,6 +58,7 @@ TOOL_SCHEMAS = [
                     "start": {"type": "string", "description": "Início em ISO 8601"},
                     "end": {"type": "string", "description": "Fim em ISO 8601"},
                     "description": {"type": "string", "description": "Descrição opcional do evento"},
+                    "calendar": _CALENDAR_PARAM,
                 },
                 "required": ["title", "start", "end"],
             },
@@ -73,6 +81,35 @@ TOOL_SCHEMAS = [
                     "title": {"type": "string", "description": "Título exato do evento a remover"},
                     "start": {"type": "string", "description": "Início exato em ISO 8601"},
                     "end": {"type": "string", "description": "Fim exato em ISO 8601"},
+                    "calendar": _CALENDAR_PARAM,
+                },
+                "required": ["title", "start", "end"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_event",
+            "description": (
+                "Propõe a edição de um evento existente (mudar título, horário e/ou "
+                "descrição, mantendo o mesmo evento). Não escreve imediatamente — depende "
+                "de confirmação explícita do usuário, tratada fora do modelo. Identifique "
+                "o evento atual por título, início e fim exatos (de uma busca recente com "
+                "search_events, se necessário), e informe em new_* apenas os campos que "
+                "devem mudar."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "Título atual exato do evento a editar"},
+                    "start": {"type": "string", "description": "Início atual exato em ISO 8601"},
+                    "end": {"type": "string", "description": "Fim atual exato em ISO 8601"},
+                    "new_title": {"type": "string", "description": "Novo título, se for mudar"},
+                    "new_start": {"type": "string", "description": "Novo início em ISO 8601, se for mudar"},
+                    "new_end": {"type": "string", "description": "Novo fim em ISO 8601, se for mudar"},
+                    "new_description": {"type": "string", "description": "Nova descrição, se for mudar"},
+                    "calendar": _CALENDAR_PARAM,
                 },
                 "required": ["title", "start", "end"],
             },
