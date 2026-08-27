@@ -124,13 +124,18 @@ class ConfigManager:
         return self._agent.get("base_url", "https://api.deepseek.com")
 
     def get_google_service_account_key(self) -> Optional[str]:
-        return os.getenv("GOOGLE_SERVICE_ACCOUNT_KEY")
+        value = os.getenv("GOOGLE_SERVICE_ACCOUNT_KEY")
+        return value.strip() if value else value
 
     def get_google_calendar_id(self) -> Optional[str]:
-        return os.getenv("GOOGLE_CALENDAR_ID_PERSONAL")
+        value = os.getenv("GOOGLE_CALENDAR_ID_PERSONAL")
+        return value.strip() if value else value
 
     def get_google_calendar_id_pets(self) -> Optional[str]:
-        return os.getenv("GOOGLE_CALENDAR_ID_PETS")
+        # A stray trailing newline in the GitHub secret once made this an
+        # invalid calendarId, so the Calendar API returned 404.
+        value = os.getenv("GOOGLE_CALENDAR_ID_PETS")
+        return value.strip() if value else value
 
     # -- telegram bot ---------------------------------------------------------
 
