@@ -261,6 +261,59 @@ def criar_evento_google(svc, calendar_id: str, ev: dict, timezone: str, mask_tit
         raise
 
 
+def atualizar_evento_google(
+    svc, calendar_id: str, event_id: str, changes: dict, timezone: str, mask_titles: bool = False
+) -> dict:
+    """Partially update an event in Google Calendar (only the given fields change).
+
+    Args:
+        svc: Google Calendar API service.
+        calendar_id: target calendar id.
+        event_id: Google Calendar event ID.
+        changes: dict with any of 'titulo', 'inicio', 'fim', 'descricao' — only keys present are changed.
+        timezone: IANA timezone name for start/end, if either is changing.
+        mask_titles: if True, hash the title before logging it (see module docstring).
+
+    Returns:
+        The updated event resource (as returned by the Google Calendar API).
+    """
+    if not event_id:
+        raise ValueError("Missing event_id")
+    if not changes:
+        raise ValueError("No changes provided")
+
+    body = {}
+    if changes.get("titulo"):
+        body["summary"] = changes["titulo"]
+    if changes.get("inicio"):
+        body["start"] = {"dateTime": changes["inicio"], "timeZone": timezone}
+    if changes.get("fim"):
+        body["end"] = {"dateTime": changes["fim"], "timeZone": timezone}
+    if changes.get("descricao"):
+        body["description"] = changes["descricao"]
+
+    logged_title = _mask_title(changes.get("titulo", "")) if mask_titles else changes.get("titulo", event_id)
+    logger.debug(f"Updating event: {logged_title}")
+
+    try:
+        def _patch_call():
+            return svc.events().patch(calendarId=calendar_id, eventId=event_id, body=body).execute()
+
+        result = _retry(_patch_call, op_name="events.patch")
+        logger.info(f"Updated event in Google Calendar: {logged_title} (ID: {event_id[:8]}...)")
+        return result
+    except HttpError as e:
+        logger.error(f"Google Calendar API error updating event '{logged_title}': {e}")
+        if e.resp.status == 403:
+            logger.error("Permission denied. Check if the service account can update events")
+        elif e.resp.status == 404:
+            logger.error("Event not found. It may have been deleted already")
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error updating event: {e}")
+        raise
+
+
 def remover_evento_google_by_id(
     svc, calendar_id: str, event_id: str, event_title: str = "", mask_titles: bool = False
 ) -> bool:

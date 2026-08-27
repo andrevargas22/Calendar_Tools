@@ -18,7 +18,12 @@ from zoneinfo import ZoneInfo
 from openai import OpenAI
 
 from agent.src.config import get_config
-from common.google_calendar import criar_evento_google, get_calendar_service, remover_evento_google_by_id
+from common.google_calendar import (
+    atualizar_evento_google,
+    criar_evento_google,
+    get_calendar_service,
+    remover_evento_google_by_id,
+)
 from agent.src.tools import TOOL_SCHEMAS, find_matching_events, run_search_events
 
 logger = logging.getLogger(__name__)
@@ -30,13 +35,15 @@ _PENDING_PLACEHOLDER = "[Aguardando confirmação do usuário.]"
 
 @dataclass
 class PendingAction:
-    """A create/delete proposal awaiting human confirmation."""
+    """A create/update/delete proposal awaiting human confirmation."""
 
-    kind: str  # "create" | "delete"
+    kind: str  # "create" | "update" | "delete"
     prompt: str
     message_index: int = -1
+    calendar_id: Optional[str] = None
     args: Optional[dict] = None  # kind == "create"
-    event: Optional[dict] = None  # kind == "delete"
+    event: Optional[dict] = None  # kind == "update" | "delete"
+    changes: Optional[dict] = None  # kind == "update"
 
 
 @dataclass
@@ -55,7 +62,10 @@ class CalendarAgent:
         self.model = self.config.get_model()
         self.max_tokens = self.config.get_max_tokens()
         self.tz = ZoneInfo(self.config.get_timezone())
-        self.calendar_id = self.config.get_google_calendar_id()
+        self.calendars = {
+            "pessoal": self.config.get_google_calendar_id(),
+            "pets": self.config.get_google_calendar_id_pets(),
+        }
 
         self.system_prompt = self.config.load_system_prompt()
         self._mlflow_ready = self.config.setup_mlflow()
@@ -65,6 +75,10 @@ class CalendarAgent:
         if self._svc is None:
             self._svc = get_calendar_service(self.config.get_google_service_account_key())
         return self._svc
+
+    def _resolve_calendar_id(self, args: dict) -> str:
+        key = args.get("calendar") or "pessoal"
+        return self.calendars.get(key, self.calendars["pessoal"])
 
     def _build_system(self) -> str:
         now = datetime.now(self.tz)
@@ -206,11 +220,13 @@ class CalendarAgent:
 
     def _dispatch_tool(self, name: str, args: dict) -> Union[str, PendingAction]:
         if name == "search_events":
-            return run_search_events(self._get_service(), self.calendar_id, args)
+            return run_search_events(self._get_service(), self._resolve_calendar_id(args), args)
         if name == "create_event":
             return self._handle_create_event(args)
         if name == "delete_event":
             return self._handle_delete_event(args)
+        if name == "update_event":
+            return self._handle_update_event(args)
         return f"Ferramenta desconhecida: {name}"
 
     def _handle_create_event(self, args: dict) -> Union[str, PendingAction]:
@@ -219,8 +235,9 @@ class CalendarAgent:
         start = datetime.fromisoformat(args["start"])
         end = datetime.fromisoformat(args["end"])
         description = args.get("description")
+        calendar_id = self._resolve_calendar_id(args)
 
-        matches = find_matching_events(self._get_service(), self.calendar_id, title, start, end)
+        matches = find_matching_events(self._get_service(), calendar_id, title, start, end)
         if matches:
             return (
                 f"Já existe um evento idêntico ('{matches[0]['titulo']}') nesse horário — "
@@ -237,15 +254,16 @@ class CalendarAgent:
             prompt_lines.append(f"  Descrição: {description}")
         prompt_lines.append("Confirmar criação? [s/N]")
 
-        return PendingAction(kind="create", prompt="\n".join(prompt_lines), args=args)
+        return PendingAction(kind="create", prompt="\n".join(prompt_lines), args=args, calendar_id=calendar_id)
 
     def _handle_delete_event(self, args: dict) -> Union[str, PendingAction]:
         """Look up the exact event by title+time; zero/multiple matches are an immediate no-op, one match returns a PendingAction."""
         title = args["title"]
         start = datetime.fromisoformat(args["start"])
         end = datetime.fromisoformat(args["end"])
+        calendar_id = self._resolve_calendar_id(args)
 
-        matches = find_matching_events(self._get_service(), self.calendar_id, title, start, end)
+        matches = find_matching_events(self._get_service(), calendar_id, title, start, end)
         if not matches:
             return "Não encontrei nenhum evento com esse título e horário exatos — nada foi removido."
         if len(matches) > 1:
@@ -262,15 +280,69 @@ class CalendarAgent:
             f"  Fim:    {event['fim'].isoformat()}\n"
             "Confirmar remoção? [s/N]"
         )
-        return PendingAction(kind="delete", prompt=prompt, event=event)
+        return PendingAction(kind="delete", prompt=prompt, event=event, calendar_id=calendar_id)
+
+    def _handle_update_event(self, args: dict) -> Union[str, PendingAction]:
+        """Look up the exact event by title+time, then propose the given new_* fields as changes."""
+        title = args["title"]
+        start = datetime.fromisoformat(args["start"])
+        end = datetime.fromisoformat(args["end"])
+        calendar_id = self._resolve_calendar_id(args)
+
+        matches = find_matching_events(self._get_service(), calendar_id, title, start, end)
+        if not matches:
+            return "Não encontrei nenhum evento com esse título e horário exatos — nada foi alterado."
+        if len(matches) > 1:
+            return (
+                f"Encontrei {len(matches)} eventos idênticos ('{title}') nesse horário — "
+                "não vou editar nenhum sem saber qual exatamente. Verifique a agenda diretamente."
+            )
+
+        changes = {}
+        if args.get("new_title"):
+            changes["titulo"] = args["new_title"]
+        if args.get("new_start"):
+            changes["inicio"] = args["new_start"]
+        if args.get("new_end"):
+            changes["fim"] = args["new_end"]
+        if args.get("new_description"):
+            changes["descricao"] = args["new_description"]
+
+        if not changes:
+            return "Nenhum campo novo foi informado para alterar — nada foi editado."
+
+        event = matches[0]
+        prompt_lines = [
+            "O agente quer editar o seguinte evento:",
+            f"  Título atual: {event['titulo']}",
+            f"  Início atual: {event['inicio'].isoformat()}",
+            f"  Fim atual:    {event['fim'].isoformat()}",
+            "Para:",
+        ]
+        if "titulo" in changes:
+            prompt_lines.append(f"  Novo título: {changes['titulo']}")
+        if "inicio" in changes:
+            prompt_lines.append(f"  Novo início: {changes['inicio']}")
+        if "fim" in changes:
+            prompt_lines.append(f"  Novo fim:    {changes['fim']}")
+        if "descricao" in changes:
+            prompt_lines.append(f"  Nova descrição: {changes['descricao']}")
+        prompt_lines.append("Confirmar edição? [s/N]")
+
+        return PendingAction(
+            kind="update", prompt="\n".join(prompt_lines), event=event, changes=changes, calendar_id=calendar_id
+        )
 
     def _resolve_pending(self, pending: PendingAction, confirmed: bool) -> str:
         if not confirmed:
-            return (
-                "O usuário cancelou a criação do evento."
-                if pending.kind == "create"
-                else "O usuário cancelou a remoção do evento."
-            )
+            cancel_texts = {
+                "create": "O usuário cancelou a criação do evento.",
+                "update": "O usuário cancelou a edição do evento.",
+                "delete": "O usuário cancelou a remoção do evento.",
+            }
+            return cancel_texts[pending.kind]
+
+        calendar_id = pending.calendar_id or self.calendars["pessoal"]
 
         if pending.kind == "create":
             title = pending.args["title"]
@@ -278,7 +350,7 @@ class CalendarAgent:
                 return f"[DRY RUN] Evento '{title}' seria criado, mas dry_run está ativado — nada foi escrito na agenda."
             result = criar_evento_google(
                 self._get_service(),
-                self.calendar_id,
+                calendar_id,
                 {
                     "titulo": title,
                     "inicio": pending.args["start"],
@@ -289,10 +361,19 @@ class CalendarAgent:
             )
             return f"Evento '{title}' criado com sucesso (ID: {result.get('id', 'unknown')})."
 
+        if pending.kind == "update":
+            title = pending.event["titulo"]
+            if self.config.is_dry_run():
+                return f"[DRY RUN] Evento '{title}' seria editado, mas dry_run está ativado — nada foi alterado na agenda."
+            atualizar_evento_google(
+                self._get_service(), calendar_id, pending.event["id"], pending.changes, self.config.get_timezone()
+            )
+            return f"Evento '{title}' atualizado com sucesso."
+
         title = pending.event["titulo"]
         if self.config.is_dry_run():
             return f"[DRY RUN] Evento '{title}' seria removido, mas dry_run está ativado — nada foi apagado da agenda."
-        success = remover_evento_google_by_id(self._get_service(), self.calendar_id, pending.event["id"], title)
+        success = remover_evento_google_by_id(self._get_service(), calendar_id, pending.event["id"], title)
         if success:
             return f"Evento '{title}' removido com sucesso."
         return f"Falha ao remover o evento '{title}' — veja os logs para detalhes."

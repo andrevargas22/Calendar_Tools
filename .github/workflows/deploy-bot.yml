@@ -46,6 +46,7 @@ jobs:
       - name: Write Cloud Run env vars file
         env:
           GOOGLE_CALENDAR_ID_PERSONAL: ${{ secrets.GOOGLE_CALENDAR_ID_PERSONAL }}
+          GOOGLE_CALENDAR_ID_PETS: ${{ secrets.GOOGLE_CALENDAR_ID_PETS }}
           MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
           TELEGRAM_ALLOWED_USER_ID: ${{ secrets.TELEGRAM_ALLOWED_USER_ID }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
@@ -60,6 +61,7 @@ jobs:
 
           keys = [
               "GOOGLE_CALENDAR_ID_PERSONAL",
+              "GOOGLE_CALENDAR_ID_PETS",
               "MLFLOW_TRACKING_URI",
               "TELEGRAM_ALLOWED_USER_ID",
               "DEEPSEEK_API_KEY",
